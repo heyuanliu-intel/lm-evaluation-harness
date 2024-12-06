@@ -14,7 +14,7 @@ class OptimumLM(HFLM):
         super().__init__(device=self.hpu_device, **kwargs)
 
     def _create_model(self, pretrained: str, ** kwargs) -> None:
-        from oh_utils import initialize_model
+        from lm_eval.models.oh_utils import initialize_model
 
         model_kwargs = kwargs if kwargs else {}
         model_kwargs["model_name_or_path"] = pretrained

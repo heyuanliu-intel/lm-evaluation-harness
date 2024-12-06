@@ -322,7 +322,7 @@ class OptimumLM(HFLM):
         from lm_eval.models.oh_utils import initialize_model
 
         parser = setup_lm_eval_parser()
-        arg_str = [f"--{k}={v}" for k, v in kwargs.items()]
+        arg_str = ['--model_name_or_path=/hf/hf_models/llama-2-7b-chat-hf/']
         print(arg_str)
         model_kwargs = parser.parse_args(arg_str)
         print(model_kwargs)

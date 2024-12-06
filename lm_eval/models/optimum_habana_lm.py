@@ -340,8 +340,6 @@ class OptimumLM(HFLM):
         from lm_eval.models.oh_utils import initialize_model
 
         model_kwargs = setup_lm_eval_parser()
-        model_kwargs["model_name_or_path"] = pretrained
-
         print(model_kwargs)
 
         model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)

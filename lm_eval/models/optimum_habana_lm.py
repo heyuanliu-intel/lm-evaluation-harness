@@ -346,6 +346,8 @@ class OptimumLM(HFLM):
         self._model = model
         self.options = generation_config
         self._batch_size = model_kwargs.batch_size
+        self.buckets = model_kwargs.buckets
+
         self.model_inputs = {"use_cache": self.options.use_cache}
 
         if self._model.config.model_type in [

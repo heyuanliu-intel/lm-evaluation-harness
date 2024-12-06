@@ -394,12 +394,6 @@ class OptimumLM(HFLM):
         # Returning 'cpu' to keep tensors on CPU in lm_eval code
         return "cpu"
 
-    def tok_encode(self, string):
-        return self.tokenizer.encode(string)
-
-    def tok_decode(self, tokens):
-        return self.tokenizer.decode(tokens)
-
     def _model_generate(self, context, max_length, eos_token_id):
         raise NotImplementedError()
 

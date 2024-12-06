@@ -336,6 +336,10 @@ class OptimumLM(HFLM):
         if model_kwargs.use_flash_attention and not model_kwargs.flash_attention_fast_softmax:
             model_kwargs.flash_attention_fast_softmax = True
 
+        model_kwargs.quant_config = os.getenv("QUANT_CONFIG", "")
+        if model_kwargs.quant_config == "" and model_kwargs.disk_offload:
+            logger.warning("`--disk_offload` was tested only with fp8, it may not work with full precision. If error raises try to remove the --disk_offload flag.")
+
         print(model_kwargs)
         model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)
         self.tokenizer = tokenizer

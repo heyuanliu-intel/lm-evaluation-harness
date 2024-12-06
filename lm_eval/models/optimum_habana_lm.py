@@ -14,47 +14,45 @@ class OptimumLM(HFLM):
         super().__init__(device=self.hpu_device, **kwargs)
 
     def _create_model(self, pretrained: str, ** kwargs) -> None:
-        if not find_spec("optimum-habana"):
-            raise ModuleNotFoundError("package `optimum-habana` is not installed. Please install it via `pip install optimum-habana`")
-        else:
-            from oh_utils import initialize_model
+        from oh_utils import initialize_model
 
-            model_kwargs = kwargs if kwargs else {}
-            model_kwargs["model_name_or_path"] = pretrained
+        model_kwargs = kwargs if kwargs else {}
+        model_kwargs["model_name_or_path"] = pretrained
+        print(model_kwargs)
 
-            model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)
-            self.tokenizer = tokenizer
-            self.model = model
-            self.options = generation_config
-            self._batch_size = model_kwargs.batch_size
-            self.model_inputs = {"use_cache": self.options.use_cache}
+        model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)
+        self.tokenizer = tokenizer
+        self.model = model
+        self.options = generation_config
+        self._batch_size = model_kwargs.batch_size
+        self.model_inputs = {"use_cache": self.options.use_cache}
 
-            if self.model.config.model_type in [
-                "llama",
-                "mistral",
-                "falcon",
-                "phi",
-                "mixtral",
-                "qwen2",
-                "gptj",
-                "starcoder2",
-                "baichuan"
-            ]:
-                self.model_inputs.update({"reuse_cache": self.options.reuse_cache})
+        if self.model.config.model_type in [
+            "llama",
+            "mistral",
+            "falcon",
+            "phi",
+            "mixtral",
+            "qwen2",
+            "gptj",
+            "starcoder2",
+            "baichuan"
+        ]:
+            self.model_inputs.update({"reuse_cache": self.options.reuse_cache})
 
-            if self.model.config.model_type in ["llama", "mistral", "qwen2", "falcon", "starcoder2", "baichuan"]:
-                if self.model.config.model_type != "falcon":
-                    self.model_inputs.update({"attn_softmax_bf16": self.options.attn_softmax_bf16})
-                self.model_inputs.update(
-                    {
-                        "use_flash_attention": self.options.use_flash_attention,
-                        "flash_attention_recompute": self.options.flash_attention_recompute,
-                        "flash_attention_causal_mask": self.options.flash_attention_causal_mask,
-                    }
-                )
+        if self.model.config.model_type in ["llama", "mistral", "qwen2", "falcon", "starcoder2", "baichuan"]:
+            if self.model.config.model_type != "falcon":
+                self.model_inputs.update({"attn_softmax_bf16": self.options.attn_softmax_bf16})
+            self.model_inputs.update(
+                {
+                    "use_flash_attention": self.options.use_flash_attention,
+                    "flash_attention_recompute": self.options.flash_attention_recompute,
+                    "flash_attention_causal_mask": self.options.flash_attention_causal_mask,
+                }
+            )
 
-            if model_kwargs.warmup:
-                self.warm_up()
+        if model_kwargs.warmup:
+            self.warm_up()
 
     def warm_up(self):
         for bucket_size in reversed(self.buckets):

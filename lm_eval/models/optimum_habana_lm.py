@@ -284,24 +284,6 @@ def setup_parser(parser):
         help="Whether to use dynamic MoE kernel.",
     )
 
-    args = parser.parse_args()
-
-    if args.torch_compile:
-        args.use_hpu_graphs = False
-
-    if not args.use_hpu_graphs:
-        args.limit_hpu_graphs = False
-
-    if args.use_flash_attention and not args.flash_attention_fast_softmax:
-        args.flash_attention_fast_softmax = True
-
-    args.quant_config = os.getenv("QUANT_CONFIG", "")
-    if args.quant_config == "" and args.disk_offload:
-        logger.warning(
-            "`--disk_offload` was tested only with fp8, it may not work with full precision. If error raises try to remove the --disk_offload flag."
-        )
-    return args
-
 
 def setup_lm_eval_parser():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="Evaluation script for HPU")
@@ -326,8 +308,8 @@ def setup_lm_eval_parser():
         default=["hellaswag", "lambada_openai", "piqa", "winogrande"],
     )
     parser.add_argument("--limit_iters", type=int, help="limit examples to run that many iterations", default=None)
-    args = setup_parser(parser)
-    return args
+    setup_parser(parser)
+    return parser
 
 
 @register_model("oh", "optimum-habana")
@@ -336,12 +318,22 @@ class OptimumLM(HFLM):
         self.hpu_device = device
         super().__init__(device=self.hpu_device, **kwargs)
 
-    def _create_model(self, pretrained: str, ** kwargs) -> None:
+    def _create_model(self, ** kwargs) -> None:
         from lm_eval.models.oh_utils import initialize_model
 
-        model_kwargs = setup_lm_eval_parser()
-        print(model_kwargs)
+        parser = setup_lm_eval_parser()
+        print(kwargs)
+        model_kwargs = parser.parse_args(kwargs)
+        if model_kwargs.torch_compile:
+            model_kwargs.use_hpu_graphs = False
 
+        if not model_kwargs.use_hpu_graphs:
+            model_kwargs.limit_hpu_graphs = False
+
+        if model_kwargs.use_flash_attention and not model_kwargs.flash_attention_fast_softmax:
+            model_kwargs.flash_attention_fast_softmax = True
+
+        print(model_kwargs)
         model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)
         self.tokenizer = tokenizer
         self.model = model

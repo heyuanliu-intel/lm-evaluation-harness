@@ -322,8 +322,11 @@ class OptimumLM(HFLM):
         from lm_eval.models.oh_utils import initialize_model
 
         parser = setup_lm_eval_parser()
-        print(kwargs)
-        model_kwargs = parser.parse_args(kwargs)
+        arg_str = [f"--{k}={v}" for k, v in kwargs.items()]
+        print(arg_str)
+        model_kwargs = parser.parse_args(arg_str)
+        print(model_kwargs)
+
         if model_kwargs.torch_compile:
             model_kwargs.use_hpu_graphs = False
 

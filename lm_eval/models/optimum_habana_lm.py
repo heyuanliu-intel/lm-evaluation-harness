@@ -316,6 +316,7 @@ def setup_lm_eval_parser():
 class OptimumLM(HFLM):
     def __init__(self, device="hpu", **kwargs) -> None:
         self.hpu_device = device
+        self._device = torch.device(device)
         super().__init__(device=self.hpu_device, **kwargs)
 
     def _create_model(self, ** kwargs) -> None:

@@ -1,4 +1,5 @@
 import os
+import copy
 import torch
 import logging
 import argparse
@@ -401,3 +402,41 @@ class OptimumLM(HFLM):
             logits = logits[:, :-padding_length, :]
         logits = logits.to(torch.float32)
         return logits
+
+    def _model_generate(self, context, attention_mask, stop, **generation_kwargs):
+        # build stopping criteria
+        # !!! TODO: Yun if add stopping_criteria, Llama3-8b-instruct doesn't work, output output 1 tokn.
+        # stopping_criteria = stop_sequences_criteria(
+        #    self.tokenizer, stop, context.shape[1], context.shape[0]
+        # )
+
+        generation_config = copy.deepcopy(self._model.generation_config)
+        generation_config.max_new_tokens = 512
+        generation_config.do_sample = False
+        # generation_config.temperature = 0.7
+        # generation_config.top_p = 0.8
+        # generation_config.top_k = 20
+        # generation_config.repetition_penalty = 1.05
+        generation_config.use_flash_attention = False  # True
+        generation_config.bucket_size = 256
+        generation_config.bucket_internal = False
+        generation_config.reuse_cache = False
+        generation_config.trim_logits = True
+        generation_config.ignore_eos = False
+        generation_config.static_shapes = True
+        generation_config.limit_hpu_graphs = True
+        # print(f" GGGGGGG Yun generation_config: {generation_config}")
+        # print(f" GGGGGGG Yun config: {self.config}")
+
+        cont = self.model.generate(
+            input_ids=context,
+            attention_mask=attention_mask,
+            generation_config=generation_config,
+            ignore_eos=True,
+            # Disabled by Yun, otherwise llama3.1 output only 1 token
+            # stopping_criteria=stopping_criteria,
+            lazy_mode=True,  # self.use_lazy_mode,
+            hpu_graphs=True,  # self.use_hpu_graphs,
+            pad_token_id=self.tokenizer.pad_token_id,
+        ).cpu()
+        return cont

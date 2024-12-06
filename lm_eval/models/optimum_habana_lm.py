@@ -380,23 +380,6 @@ class OptimumLM(HFLM):
     def max_length(self):
         return self.buckets[-1]
 
-    @property
-    def max_gen_toks(self):
-        raise NotImplementedError()
-
-    @property
-    def batch_size(self):
-        return self._batch_size
-
-    @property
-    def device(self):
-        # We need to do padding ourselves, otherwise we'll end up with recompilations
-        # Returning 'cpu' to keep tensors on CPU in lm_eval code
-        return "cpu"
-
-    def _model_generate(self, context, max_length, eos_token_id):
-        raise NotImplementedError()
-
     def find_bucket(self, length):
         return [b for b in self.buckets if b >= length][0]
 

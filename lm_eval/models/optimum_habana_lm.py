@@ -316,11 +316,6 @@ def setup_lm_eval_parser():
 class OptimumLM(HFLM):
     def __init__(self, device="hpu", **kwargs) -> None:
         self.hpu_device = device
-        self.model = None
-        self.tokenizer = None
-        self.options = None
-        self.model_inputs = None
-
         super().__init__(device=self.hpu_device, **kwargs)
 
     def _create_model(self, ** kwargs) -> None:
@@ -348,12 +343,12 @@ class OptimumLM(HFLM):
         print(model_kwargs)
         model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)
         self.tokenizer = tokenizer
-        self.model = model
+        self._model = model
         self.options = generation_config
         self._batch_size = model_kwargs.batch_size
         self.model_inputs = {"use_cache": self.options.use_cache}
 
-        if self.model.config.model_type in [
+        if self._model.config.model_type in [
             "llama",
             "mistral",
             "falcon",
@@ -366,8 +361,8 @@ class OptimumLM(HFLM):
         ]:
             self.model_inputs.update({"reuse_cache": self.options.reuse_cache})
 
-        if self.model.config.model_type in ["llama", "mistral", "qwen2", "falcon", "starcoder2", "baichuan"]:
-            if self.model.config.model_type != "falcon":
+        if self._model.config.model_type in ["llama", "mistral", "qwen2", "falcon", "starcoder2", "baichuan"]:
+            if self._model.config.model_type != "falcon":
                 self.model_inputs.update({"attn_softmax_bf16": self.options.attn_softmax_bf16})
             self.model_inputs.update(
                 {
@@ -388,7 +383,7 @@ class OptimumLM(HFLM):
 
     @property
     def eot_token_id(self):
-        return self.model.config.eos_token_id
+        return self._model.config.eos_token_id
 
     @property
     def max_length(self):
@@ -426,10 +421,10 @@ class OptimumLM(HFLM):
         if self.options.static_shapes:
             bucket_length = self.find_bucket(seq_length)
             if self.options.use_cache and self.options.reuse_cache:
-                self.model.allocate_kv_cache(bs, bucket_length + 1, bucket_length)
+                self._model.allocate_kv_cache(bs, bucket_length + 1, bucket_length)
             padding_length = bucket_length - seq_length
-            inps = F.pad(inps, (0, padding_length), value=self.model.config.pad_token_id)
-        logits = self.model(inps.to(self._device), **self.model_inputs)["logits"].cpu()
+            inps = F.pad(inps, (0, padding_length), value=self._model.config.pad_token_id)
+        logits = self._model(inps.to(self._device), **self.model_inputs)["logits"].cpu()
 
         if self.options.static_shapes and padding_length > 0:
             logits = logits[:, :-padding_length, :]

@@ -372,15 +372,6 @@ class OptimumLM(HFLM):
                 }
             )
 
-        if model_kwargs.warmup:
-            self.warm_up()
-
-    def warm_up(self):
-        for bucket_size in reversed(self.buckets):
-            inps = torch.ones((self._batch_size, bucket_size), dtype=torch.int64)
-            self._model_call(inps)
-            pass
-
     @property
     def eot_token_id(self):
         return self._model.config.eos_token_id

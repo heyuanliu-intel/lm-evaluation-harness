@@ -1,5 +1,3 @@
-from typing import Optional
-
 import os
 import copy
 import shutil
@@ -261,6 +259,7 @@ class Args(object):
     batch_size = 1
     warmup = 3
     n_iterations = 5
+    reuse_cache = True
     use_kv_cache = True
     use_hpu_graphs = True
     attn_softmax_bf16 = True
@@ -269,28 +268,38 @@ class Args(object):
     torch_compile = False
     show_graphs_count = False
     bucket_internal = True
+    bucket_size = 128
     trust_remote_code = True
     num_beams = 1
     bad_words = None
     force_words = None
     token = None
+    top_k = None
+    num_return_sequences = 1
+    trim_logits = True
+    penalty_alpha = None
+    reduce_recompile = False
+    use_flash_attention = True
+    flash_attention_recompute = False
+    flash_attention_causal_mask = False
+    flash_attention_fast_softmax = False
     model_revision = "main"
 
 
 @register_model("optimum-habana")
 class HabanaModelAdapter(HFLM):
     def __init__(self, pretrained: str, **kwargs) -> None:
-        super().__init__(device="hpu", pretrained=pretrained, **kwargs)
-        self._device = torch.device("hpu")
-
         args = Args()
         args.model_name_or_path = pretrained
         model, tokenizer, generation_config = initialize_model(args)
-        self.model = model
+        super().__init__(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
+
+        self._model = model
         self.tokenizer = tokenizer
         self.generation_config = generation_config
+        self._device = args.device
 
     def _model_call(self, inps, attn_mask=None, labels=None):
-        logits = self.model(inps.to(self._device), **self.generation_config)["logits"].cpu()
+        logits = self._model(inps.to(self._device), **self.generation_config)["logits"].cpu()
         logits = logits.to(torch.float32)
         return logits

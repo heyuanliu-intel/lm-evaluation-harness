@@ -254,17 +254,35 @@ def initialize_model(args):
     return model, tokenizer, generation_config
 
 
+class Args(object):
+    device = "hpu"
+    model_name_or_path = ""
+    bf16 = True
+    max_new_tokens = 100
+    max_input_tokens = 0
+    batch_size = 1
+    warmup = 3
+    n_iterations = 5
+    use_kv_cache = True
+    use_hpu_graphs = True
+    attn_softmax_bf16 = True
+    limit_hpu_graphs = True
+    do_sample = True
+    num_beams = 1
+
+
 @register_model("optimum-habana")
 class HabanaModelAdapter(HFLM):
-    def __init__(self, pretrained: str, batch_size: Optional[int] = 1, **kwargs) -> None:
-        super().__init__(pretrained=pretrained, batch_size=batch_size)
+    def __init__(self, pretrained: str, **kwargs) -> None:
+        super().__init__(device="hpu", pretrained=pretrained, **kwargs)
+        self._device = torch.device("hpu")
 
-        model, tokenizer, generation_config = initialize_model(kwargs)
+        args = Args()
+        args.model_name_or_path = pretrained
+        model, tokenizer, generation_config = initialize_model(args)
         self.model = model
         self.tokenizer = tokenizer
         self.generation_config = generation_config
-
-        self._device = torch.device("hpu")
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         logits = self.model(inps.to(self._device), **self.generation_config)["logits"].cpu()

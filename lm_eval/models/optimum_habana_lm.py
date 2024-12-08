@@ -1,442 +1,272 @@
+from typing import Optional
+
 import os
 import copy
+import shutil
+import tempfile
 import torch
-import logging
-import argparse
-import torch.nn.functional as F
+
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from optimum.habana.checkpoint_utils import (
+    get_ds_injection_policy,
+    model_is_optimized,
+    model_on_meta,
+    write_checkpoints_json,
+)
+
 from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
-logger = logging.getLogger(__name__)
 
 
-def setup_parser(parser):
-    # Arguments management
-    parser.add_argument("--device", "-d", type=str, choices=["hpu"], help="Device to run", default="hpu")
-    parser.add_argument(
-        "--model_name_or_path",
-        default=None,
-        type=str,
-        required=True,
-        help="Path to pre-trained model (on the HF Hub or locally).",
-    )
-    parser.add_argument(
-        "--bf16",
-        action="store_true",
-        help="Whether to perform generation in bf16 precision.",
-    )
-    parser.add_argument("--max_new_tokens", type=int, default=100, help="Number of tokens to generate.")
-    parser.add_argument(
-        "--max_input_tokens",
-        type=int,
-        default=0,
-        help="If > 0 then pad and truncate the input sequences to this specified length of tokens. \
-            if == 0, then truncate to 16 (original default) \
-            if < 0, then do not truncate, use full input prompt",
-    )
-    parser.add_argument("--batch_size", type=int, default=1, help="Input batch size.")
-    parser.add_argument("--warmup", type=int, default=3, help="Number of warmup iterations for benchmarking.")
-    parser.add_argument("--n_iterations", type=int, default=5, help="Number of inference iterations for benchmarking.")
-    parser.add_argument("--local_rank", type=int, default=0, metavar="N", help="Local process rank.")
-    parser.add_argument(
-        "--use_kv_cache",
-        action="store_true",
-        help="Whether to use the key/value cache for decoding. It should speed up generation.",
-    )
-    parser.add_argument(
-        "--use_hpu_graphs",
-        action="store_true",
-        help="Whether to use HPU graphs or not. Using HPU graphs should give better latencies.",
-    )
-    parser.add_argument(
-        "--dataset_name",
-        default=None,
-        type=str,
-        help="Optional argument if you want to assess your model on a given dataset of the HF Hub.",
-    )
-    parser.add_argument(
-        "--column_name",
-        default=None,
-        type=str,
-        help="If `--dataset_name` was given, this will be the name of the column to use as prompts for generation.",
-    )
-    parser.add_argument(
-        "--do_sample",
-        action="store_true",
-        help="Whether to use sampling for generation.",
-    )
-    parser.add_argument(
-        "--num_beams",
-        default=1,
-        type=int,
-        help="Number of beams used for beam search generation. 1 means greedy search will be performed.",
-    )
-    parser.add_argument(
-        "--top_k",
-        default=None,
-        type=int,
-        help="Size of candidate set used for re-ranking in contrastive search. top_k > 1 enables contrastive search.",
-    )
-    parser.add_argument(
-        "--penalty_alpha",
-        default=None,
-        type=float,
-        help="Degeneration penalty for contrastive search. penalty_alpha > 0 enables contrastive search.",
-    )
-    parser.add_argument(
-        "--trim_logits",
-        action="store_true",
-        help="Calculate logits only for the last token to save memory in the first step.",
-    )
-    parser.add_argument(
-        "--seed",
-        default=27,
-        type=int,
-        help="Seed to use for random generation. Useful to reproduce your runs with `--do_sample`.",
-    )
-    parser.add_argument(
-        "--profiling_warmup_steps",
-        default=0,
-        type=int,
-        help="Number of steps to ignore for profiling.",
-    )
-    parser.add_argument(
-        "--profiling_steps",
-        default=0,
-        type=int,
-        help="Number of steps to capture for profiling.",
-    )
-    parser.add_argument(
-        "--profiling_record_shapes",
-        default=False,
-        type=bool,
-        help="Record shapes when enabling profiling.",
-    )
-    parser.add_argument(
-        "--prompt",
-        default=None,
-        type=str,
-        nargs="*",
-        help='Optional argument to give a prompt of your choice as input. Can be a single string (eg: --prompt "Hello world"), or a list of space-separated strings (eg: --prompt "Hello world" "How are you?")',
-    )
-    parser.add_argument(
-        "--bad_words",
-        default=None,
-        type=str,
-        nargs="+",
-        help="Optional argument list of words that are not allowed to be generated.",
-    )
-    parser.add_argument(
-        "--force_words",
-        default=None,
-        type=str,
-        nargs="+",
-        help="Optional argument list of words that must be generated.",
-    )
-    parser.add_argument(
-        "--assistant_model",
-        default=None,
-        type=str,
-        help="Optional argument to give a path to a draft/assistant model for assisted decoding.",
-    )
-    parser.add_argument(
-        "--peft_model",
-        default=None,
-        type=str,
-        help="Optional argument to give a path to a PEFT model.",
-    )
-    parser.add_argument("--num_return_sequences", type=int, default=1)
-    parser.add_argument(
-        "--token",
-        default=None,
-        type=str,
-        help="The token to use as HTTP bearer authorization for remote files. If not specified, will use the token "
-        "generated when running `huggingface-cli login` (stored in `~/.huggingface`).",
-    )
-    parser.add_argument(
-        "--model_revision",
-        default="main",
-        type=str,
-        help="The specific model version to use (can be a branch name, tag name or commit id).",
-    )
-    parser.add_argument(
-        "--attn_softmax_bf16",
-        action="store_true",
-        help="Whether to run attention softmax layer in lower precision provided that the model supports it and "
-        "is also running in lower precision.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        default=None,
-        type=str,
-        help="Output directory to store results in.",
-    )
-    parser.add_argument(
-        "--bucket_size",
-        default=-1,
-        type=int,
-        help="Bucket size to maintain static shapes. If this number is negative (default is -1) \
-            then we use `shape = prompt_length + max_new_tokens`. If a positive number is passed \
-            we increase the bucket in steps of `bucket_size` instead of allocating to max (`prompt_length + max_new_tokens`).",
-    )
-    parser.add_argument(
-        "--bucket_internal",
-        action="store_true",
-        help="Split kv sequence into buckets in decode phase. It improves throughput when max_new_tokens is large.",
-    )
-    parser.add_argument(
-        "--dataset_max_samples",
-        default=-1,
-        type=int,
-        help="If a negative number is passed (default = -1) perform inference on the whole dataset, else use only `dataset_max_samples` samples.",
-    )
-    parser.add_argument(
-        "--limit_hpu_graphs",
-        action="store_true",
-        help="Skip HPU Graph usage for first token to save memory",
-    )
-    parser.add_argument(
-        "--reuse_cache",
-        action="store_true",
-        help="Whether to reuse key/value cache for decoding. It should save memory.",
-    )
-    parser.add_argument("--verbose_workers", action="store_true", help="Enable output from non-master workers")
-    parser.add_argument(
-        "--simulate_dyn_prompt",
-        default=None,
-        type=int,
-        nargs="*",
-        help="If empty, static prompt is used. If a comma separated list of integers is passed, we warmup and use those shapes for prompt length.",
-    )
-    parser.add_argument(
-        "--reduce_recompile",
-        action="store_true",
-        help="Preprocess on cpu, and some other optimizations. Useful to prevent recompilations when using dynamic prompts (simulate_dyn_prompt)",
-    )
-
-    parser.add_argument(
-        "--use_flash_attention",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention, provided that the model supports it.",
-    )
-    parser.add_argument(
-        "--flash_attention_recompute",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention in recompute mode on first token generation. This gives an opportunity of splitting graph internally which helps reduce memory consumption.",
-    )
-    parser.add_argument(
-        "--flash_attention_causal_mask",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention in causal mode on first token generation.",
-    )
-    parser.add_argument(
-        "--flash_attention_fast_softmax",
-        action="store_true",
-        help="Whether to enable Habana Flash Attention in fast softmax mode.",
-    )
-    parser.add_argument(
-        "--book_source",
-        action="store_true",
-        help="Whether to use project Guttenberg books data as input. Usefull for testing large sequence lenghts.",
-    )
-    parser.add_argument(
-        "--torch_compile",
-        action="store_true",
-        help="Whether to use torch compiled model or not.",
-    )
-    parser.add_argument(
-        "--ignore_eos",
-        default=True,
-        action=argparse.BooleanOptionalAction,
-        help="Whether to disable stopping with eos token when calling `generate`. --no-ignore_eos to disable it",
-    )
-    parser.add_argument("--temperature", default=1.0, type=float, help="Temperature value for text generation")
-    parser.add_argument("--top_p", default=1.0, type=float, help="Top_p value for generating text via sampling")
-    parser.add_argument(
-        "--const_serialization_path",
-        "--csp",
-        type=str,
-        help="Path to serialize const params. Const params will be held on disk memory instead of being allocated on host memory.",
-    )
-    parser.add_argument(
-        "--disk_offload",
-        action="store_true",
-        help="Whether to enable device map auto. In case no space left on cpu, weights will be offloaded to disk.",
-    )
-    parser.add_argument(
-        "--trust_remote_code",
-        action="store_true",
-        help="Whether to trust the execution of code from datasets/models defined on the Hub. This option should only be set to `True` for repositories you trust and in which you have read the code, as it will execute code present on the Hub on your local machine.",
-    )
-    parser.add_argument(
-        "--load_quantized_model",
-        action="store_true",
-        help="Whether to load model from hugging face checkpoint.",
-    )
-    parser.add_argument(
-        "--parallel_strategy",
-        type=str,
-        choices=["tp", "none"],  # Add other strategies as needed
-        default="none",
-        help="Run multi card with the specified parallel strategy. Choices are 'tp' for Tensor Parallel Strategy or 'none'.",
-    )
-    parser.add_argument(
-        "--use_dynamic_moe",
-        action="store_true",
-        help="Whether to use dynamic MoE kernel.",
-    )
+def setup_distributed(args):
+    args.local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    args.world_size = int(os.getenv("WORLD_SIZE", "0"))
+    args.global_rank = int(os.getenv("RANK", "0"))
 
 
-def setup_lm_eval_parser():
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="Evaluation script for HPU")
-
-    parser.add_argument(
-        "--buckets",
-        type=int,
-        nargs="+",
-        help="Input length buckets to use with static_shapes",
-        default=[16, 32, 64, 128, 189, 284],
-    )
-
-    parser.add_argument(
-        "--output_file", "-o", type=str, help="Output file with end results and runtime parameters", required=True
-    )
-
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        nargs="+",
-        help="Tasks to run",
-        default=["hellaswag", "lambada_openai", "piqa", "winogrande"],
-    )
-    parser.add_argument("--limit_iters", type=int, help="limit examples to run that many iterations", default=None)
-    setup_parser(parser)
-    return parser
+def exclude_hpu_graph_configs(args):
+    # Excluded configs for batch size 1 for hpu graph
+    if args.batch_size == 1 and args.limit_hpu_graphs:
+        if "falcon-180B" in args.model_name_or_path or "falcon-180b" in args.model_name_or_path:
+            return False
+        if args.world_size == 2 or args.world_size == 4 or args.world_size == 8:
+            if args.max_input_tokens >= 4096 and args.max_new_tokens >= 128:
+                return False
+        return True
+    else:
+        return False
 
 
-@register_model("oh", "optimum-habana")
-class OptimumLM(HFLM):
-    def __init__(self, device="hpu", **kwargs) -> None:
-        self.hpu_device = device
-        self._device = torch.device(device)
-        super().__init__(device=self.hpu_device, **kwargs)
+def setup_env(args):
+    # TODO: SW-167588 - WA for memory issue in hqt prep_model
+    os.environ.setdefault("EXPERIMENTAL_WEIGHT_SHARING", "FALSE")
 
-    def _create_model(self, ** kwargs) -> None:
-        from lm_eval.models.oh_utils import initialize_model
+    if args.global_rank == 0 and not args.torch_compile and args.show_graphs_count:
+        os.environ.setdefault("GRAPH_VISUALIZATION", "true")
+        shutil.rmtree(".graph_dumps", ignore_errors=True)
 
-        parser = setup_lm_eval_parser()
-        arg_str = ['--model_name_or_path=/hf/hf_models/llama-2-7b-chat-hf/', '--output_file=eval.json', '--batch_size=1', '--bf16', '--use_kv_cache', '--use_hpu_graphs']
-        print(arg_str)
-        model_kwargs = parser.parse_args(arg_str)
-        print(model_kwargs)
+    if args.world_size > 0:
+        os.environ.setdefault("PT_HPU_LAZY_ACC_PAR_MODE", "0")
+        os.environ.setdefault("PT_HPU_ENABLE_LAZY_COLLECTIVES", "true")
 
-        if model_kwargs.torch_compile:
-            model_kwargs.use_hpu_graphs = False
+    if args.use_hpu_graphs and args.limit_hpu_graphs and not args.reuse_cache and args.bucket_internal:
+        # Based upon above conditions and below env variable,
+        # we can call HPU graphs clear_inputs().
+        os.environ.setdefault("PT_HPUGRAPH_DISABLE_TENSOR_CACHE", "1")
 
-        if not model_kwargs.use_hpu_graphs:
-            model_kwargs.limit_hpu_graphs = False
+    # Tweak generation so that it runs faster on Gaudi
+    from optimum.habana.transformers.modeling_utils import adapt_transformers_to_gaudi
+    adapt_transformers_to_gaudi()
 
-        if model_kwargs.use_flash_attention and not model_kwargs.flash_attention_fast_softmax:
-            model_kwargs.flash_attention_fast_softmax = True
 
-        model_kwargs.quant_config = os.getenv("QUANT_CONFIG", "")
-        if model_kwargs.quant_config == "" and model_kwargs.disk_offload:
-            logger.warning("`--disk_offload` was tested only with fp8, it may not work with full precision. If error raises try to remove the --disk_offload flag.")
+def setup_device(args):
+    if args.device == "hpu":
+        import habana_frameworks.torch.core as htcore
+        if args.quant_config:
+            htcore.hpu_set_env()
+    return torch.device(args.device)
 
-        print(model_kwargs)
-        model, _, tokenizer, generation_config = initialize_model(model_kwargs, logger)
+
+def setup_model(args, model_dtype, model_kwargs):
+    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=model_dtype, **model_kwargs)
+    model = model.eval().to(args.device)
+
+    if args.use_hpu_graphs:
+        from habana_frameworks.torch.hpu import wrap_in_hpu_graph
+        model = wrap_in_hpu_graph(model)
+
+    return model
+
+
+# patching LinearAllreduce to use ScopedLinearAllReduce
+def patch_scoped_linear_all_reduce(model):
+    from deepspeed.module_inject.layers import LinearAllreduce
+    from optimum.habana.transformers.models.modeling_all_models import ScopedLinearAllReduce
+
+    for name, module in model.named_children():
+        if type(module) is LinearAllreduce:
+            SL = ScopedLinearAllReduce(mod=module)
+            setattr(model, name, SL)
+        patch_scoped_linear_all_reduce(module)
+
+
+def setup_distributed_model(args, model_dtype, model_kwargs):
+    import deepspeed
+
+    deepspeed.init_distributed(dist_backend="hccl")
+    config = AutoConfig.from_pretrained(args.model_name_or_path, torch_dtype=model_dtype, **model_kwargs)
+    load_to_meta = model_on_meta(config)
+
+    if load_to_meta:
+        # Construct model with fake meta tensors, later will be replaced on devices during ds-inference ckpt load
+        with deepspeed.OnDevice(dtype=model_dtype, device="meta"):
+            model = AutoModelForCausalLM.from_config(config, torch_dtype=model_dtype)
+
+        # Model loaded to meta is managed differently
+        checkpoints_json = tempfile.NamedTemporaryFile(suffix=".json", mode="+w")
+
+        write_checkpoints_json(
+            args.model_name_or_path,
+            args.local_rank,
+            checkpoints_json,
+            token=args.token,
+        )
+    else:
+        # TODO: revisit placement on CPU when auto-injection is possible
+        with deepspeed.OnDevice(dtype=model_dtype, device="cpu"):
+            model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=model_dtype, **model_kwargs)
+
+    model.eval()
+
+    # Initialize the model
+    ds_inference_kwargs = {"dtype": model_dtype}
+    ds_inference_kwargs["tensor_parallel"] = {"tp_size": args.world_size}
+    ds_inference_kwargs["enable_cuda_graph"] = args.use_hpu_graphs
+    ds_inference_kwargs["injection_policy"] = get_ds_injection_policy(config)
+    if load_to_meta:
+        ds_inference_kwargs["checkpoint"] = checkpoints_json.name
+
+    model = deepspeed.init_inference(model, **ds_inference_kwargs)
+    model = model.module
+
+    if model.config.model_type in ["llama", "falcon", "qwen2", "starcoder2", "gemma"]:
+        patch_scoped_linear_all_reduce(model)
+
+    return model
+
+
+def setup_tokenizer(args, model):
+    tokenizer_kwargs = {
+        "revision": args.model_revision,
+        "token": args.token,
+        "trust_remote_code": args.trust_remote_code,
+    }
+
+    if args.bad_words is not None or args.force_words is not None:
+        tokenizer_kwargs["add_prefix_space"] = True
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, **tokenizer_kwargs)
+    if not model.config.is_encoder_decoder:
+        tokenizer.padding_side = "left"
+
+    if model.config.model_type == "llama":
+        if model.generation_config.pad_token_id is None:
+            if isinstance(model.generation_config.eos_token_id, int):
+                model.generation_config.pad_token_id = model.generation_config.eos_token_id
+            elif isinstance(model.generation_config.eos_token_id, list):
+                model.generation_config.pad_token_id = model.generation_config.eos_token_id[0]
+        tokenizer.bos_token_id = model.generation_config.bos_token_id
+        if isinstance(model.generation_config.eos_token_id, int):
+            tokenizer.eos_token_id = model.generation_config.eos_token_id
+        elif isinstance(model.generation_config.eos_token_id, list):
+            tokenizer.eos_token_id = model.generation_config.eos_token_id[0]
+        tokenizer.pad_token_id = model.generation_config.pad_token_id
+        tokenizer.pad_token = tokenizer.decode(tokenizer.pad_token_id)
+        tokenizer.eos_token = tokenizer.decode(tokenizer.eos_token_id)
+        tokenizer.bos_token = tokenizer.decode(tokenizer.bos_token_id)
+    if model.config.model_type == "persimmon":
+        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+        tokenizer.bos_token_id = model.generation_config.bos_token_id
+        tokenizer.eos_token_id = model.generation_config.eos_token_id
+        tokenizer.pad_token_id = model.generation_config.pad_token_id
+        tokenizer.pad_token = tokenizer.decode(tokenizer.pad_token_id)
+        tokenizer.eos_token = tokenizer.decode(tokenizer.eos_token_id)
+        tokenizer.bos_token = tokenizer.decode(tokenizer.bos_token_id)
+
+    # HACK: MiniCPM3 does not support list EOS token ID generation config.
+    if model.config.model_type == "minicpm3" and isinstance(model.generation_config.eos_token_id, list):
+        model.generation_config.eos_token_id = model.generation_config.eos_token_id[-1]
+
+    # Some models like GPT2 do not have a PAD token so we have to set it if necessary
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        model.generation_config.pad_token_id = model.generation_config.eos_token_id
+
+    return tokenizer, model
+
+
+def setup_generation_config(args, model, tokenizer):
+    bad_words_ids = None
+    force_words_ids = None
+    if args.bad_words is not None:
+        bad_words_ids = [tokenizer.encode(bad_word, add_special_tokens=False) for bad_word in args.bad_words]
+    if args.force_words is not None:
+        force_words_ids = [tokenizer.encode(force_word, add_special_tokens=False) for force_word in args.force_words]
+
+    is_optimized = model_is_optimized(model.config)
+
+    # Generation configuration
+    generation_config = copy.deepcopy(model.generation_config)
+    generation_config.max_new_tokens = args.max_new_tokens
+    generation_config.use_cache = args.use_kv_cache
+    generation_config.static_shapes = is_optimized
+    generation_config.bucket_size = args.bucket_size if is_optimized else -1
+    generation_config.bucket_internal = args.bucket_internal
+    generation_config.do_sample = args.do_sample
+    generation_config.num_beams = args.num_beams
+    generation_config.top_k = args.top_k
+    generation_config.penalty_alpha = args.penalty_alpha
+    generation_config.bad_words_ids = bad_words_ids
+    generation_config.force_words_ids = force_words_ids
+    generation_config.num_return_sequences = args.num_return_sequences
+    generation_config.trim_logits = args.trim_logits
+    generation_config.attn_softmax_bf16 = args.attn_softmax_bf16
+    generation_config.limit_hpu_graphs = args.limit_hpu_graphs
+    generation_config.reuse_cache = args.reuse_cache
+    generation_config.reduce_recompile = args.reduce_recompile
+    if generation_config.reduce_recompile:
+        assert generation_config.bucket_size > 0
+    generation_config.use_flash_attention = args.use_flash_attention
+    generation_config.flash_attention_recompute = args.flash_attention_recompute
+    generation_config.flash_attention_causal_mask = args.flash_attention_causal_mask
+    generation_config.flash_attention_fast_softmax = args.flash_attention_fast_softmax
+    generation_config.trust_remote_code = args.trust_remote_code
+    generation_config.valid_sequence_lengths = None
+
+    return generation_config
+
+
+def initialize_model(args):
+    setup_distributed(args)
+    if exclude_hpu_graph_configs(args):
+        args.limit_hpu_graphs = False
+    setup_env(args)
+    setup_device(args)
+
+    use_deepspeed = args.world_size > 0
+    if use_deepspeed or args.bf16:
+        model_dtype = torch.bfloat16
+    else:
+        model_dtype = torch.float
+        args.attn_softmax_bf16 = False
+
+    model_kwargs = {
+        "revision": args.model_revision,
+        "token": args.token,
+        "trust_remote_code": args.trust_remote_code,
+    }
+
+    model = (setup_model(args, model_dtype, model_kwargs) if not use_deepspeed else setup_distributed_model(args, model_dtype, model_kwargs))
+
+    tokenizer, model = setup_tokenizer(args, model)
+    generation_config = setup_generation_config(args, model, tokenizer)
+
+    return model, tokenizer, generation_config
+
+
+@register_model("optimum-habana")
+class HabanaModelAdapter(HFLM):
+    def __init__(self, pretrained: str, batch_size: Optional[int] = 1, **kwargs) -> None:
+        super().__init__(pretrained=pretrained, batch_size=batch_size)
+
+        model, tokenizer, generation_config = initialize_model(kwargs)
+        self.model = model
         self.tokenizer = tokenizer
-        self._model = model
-        self.options = generation_config
-        self._batch_size = model_kwargs.batch_size
-        self.buckets = model_kwargs.buckets
+        self.generation_config = generation_config
 
-        self.model_inputs = {"use_cache": self.options.use_cache}
+        self._device = torch.device("hpu")
 
-        if self._model.config.model_type in [
-            "llama",
-            "mistral",
-            "falcon",
-            "phi",
-            "mixtral",
-            "qwen2",
-            "gptj",
-            "starcoder2",
-            "baichuan"
-        ]:
-            self.model_inputs.update({"reuse_cache": self.options.reuse_cache})
-
-        if self._model.config.model_type in ["llama", "mistral", "qwen2", "falcon", "starcoder2", "baichuan"]:
-            if self._model.config.model_type != "falcon":
-                self.model_inputs.update({"attn_softmax_bf16": self.options.attn_softmax_bf16})
-            self.model_inputs.update(
-                {
-                    "use_flash_attention": self.options.use_flash_attention,
-                    "flash_attention_recompute": self.options.flash_attention_recompute,
-                    "flash_attention_causal_mask": self.options.flash_attention_causal_mask,
-                }
-            )
-
-    @property
-    def eot_token_id(self):
-        return self._model.config.eos_token_id
-
-    @property
-    def max_length(self):
-        return self.buckets[-1]
-
-    def find_bucket(self, length):
-        return [b for b in self.buckets if b >= length][0]
-
-    def _model_call(self, inps):
-        bs, seq_length = inps.shape
-        padding_length = 0
-        if self.options.static_shapes:
-            bucket_length = self.find_bucket(seq_length)
-            if self.options.use_cache and self.options.reuse_cache:
-                self._model.allocate_kv_cache(bs, bucket_length + 1, bucket_length)
-            padding_length = bucket_length - seq_length
-            inps = F.pad(inps, (0, padding_length), value=self._model.config.pad_token_id)
-        logits = self._model(inps.to(self._device), **self.model_inputs)["logits"].cpu()
-
-        if self.options.static_shapes and padding_length > 0:
-            logits = logits[:, :-padding_length, :]
+    def _model_call(self, inps, attn_mask=None, labels=None):
+        logits = self.model(inps.to(self._device), **self.generation_config)["logits"].cpu()
         logits = logits.to(torch.float32)
         return logits
-
-    def _model_generate(self, context, attention_mask, stop, **generation_kwargs):
-        # build stopping criteria
-        # !!! TODO: Yun if add stopping_criteria, Llama3-8b-instruct doesn't work, output output 1 tokn.
-        # stopping_criteria = stop_sequences_criteria(
-        #    self.tokenizer, stop, context.shape[1], context.shape[0]
-        # )
-
-        generation_config = copy.deepcopy(self._model.generation_config)
-        generation_config.max_new_tokens = 512
-        generation_config.do_sample = False
-        # generation_config.temperature = 0.7
-        # generation_config.top_p = 0.8
-        # generation_config.top_k = 20
-        # generation_config.repetition_penalty = 1.05
-        generation_config.use_flash_attention = False  # True
-        generation_config.bucket_size = 256
-        generation_config.bucket_internal = False
-        generation_config.reuse_cache = False
-        generation_config.trim_logits = True
-        generation_config.ignore_eos = False
-        generation_config.static_shapes = True
-        generation_config.limit_hpu_graphs = True
-        # print(f" GGGGGGG Yun generation_config: {generation_config}")
-        # print(f" GGGGGGG Yun config: {self.config}")
-
-        cont = self.model.generate(
-            input_ids=context,
-            attention_mask=attention_mask,
-            generation_config=generation_config,
-            ignore_eos=True,
-            # Disabled by Yun, otherwise llama3.1 output only 1 token
-            # stopping_criteria=stopping_criteria,
-            lazy_mode=True,  # self.use_lazy_mode,
-            hpu_graphs=True,  # self.use_hpu_graphs,
-            pad_token_id=self.tokenizer.pad_token_id,
-        ).cpu()
-        return cont

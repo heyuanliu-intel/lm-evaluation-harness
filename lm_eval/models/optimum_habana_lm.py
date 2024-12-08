@@ -62,8 +62,6 @@ def setup_env(args):
 def setup_device(args):
     if args.device == "hpu":
         import habana_frameworks.torch.core as htcore
-        if args.quant_config:
-            htcore.hpu_set_env()
     return torch.device(args.device)
 
 
@@ -268,7 +266,15 @@ class Args(object):
     attn_softmax_bf16 = True
     limit_hpu_graphs = True
     do_sample = True
+    torch_compile = False
+    show_graphs_count = False
+    bucket_internal = True
+    trust_remote_code = True
     num_beams = 1
+    bad_words = None
+    force_words = None
+    token = None
+    model_revision = "main"
 
 
 @register_model("optimum-habana")

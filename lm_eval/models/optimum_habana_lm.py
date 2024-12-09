@@ -292,14 +292,15 @@ class Args(object):
 
 @register_model("oh", "optimum-habana")
 class OptimumHabanaLM(HFLM):
-    def __init__(self, pretrained: str, batch_size: Optional[Union[int, str]] = 1, **kwargs) -> None:
-        args = Args()
-
-        for key in kwargs:
-            setattr(args, key, kwargs[key])
-
-        args.model_name_or_path = pretrained
-        args.batch_size = batch_size
+    def __init__(self, pretrained: str, batch_size: Optional[Union[int, str]] = 1, parser=None, **kwargs) -> None:
+        if parser:
+            args = parser
+        else:
+            args = Args()
+            for key in kwargs:
+                setattr(args, key, kwargs[key])
+            args.model_name_or_path = pretrained
+            args.batch_size = batch_size
 
         model, tokenizer, generation_config = initialize_model(args)
         super().__init__(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)

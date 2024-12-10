@@ -260,7 +260,7 @@ class Args(object):
     max_new_tokens = 100
     max_input_tokens = 0
     batch_size = 1
-    warmup = 3
+    warmup = 0
     n_iterations = 5
     reuse_cache = True
     use_kv_cache = True

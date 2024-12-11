@@ -42,7 +42,7 @@ def setup_env(args):
     # TODO: SW-167588 - WA for memory issue in hqt prep_model
     os.environ.setdefault("EXPERIMENTAL_WEIGHT_SHARING", "FALSE")
 
-    if args.global_rank == 0 and not args.torch_compile and args.show_graphs_count:
+    if args.global_rank == 0 and not args.torch_compile:
         os.environ.setdefault("GRAPH_VISUALIZATION", "true")
         shutil.rmtree(".graph_dumps", ignore_errors=True)
 
@@ -269,7 +269,6 @@ class Args(object):
     limit_hpu_graphs = True
     do_sample = True
     torch_compile = False
-    show_graphs_count = False
     bucket_internal = True
     bucket_size = 128
     trust_remote_code = True
@@ -336,15 +335,6 @@ class OptimumHabanaLM(HFLM):
                     "flash_attention_causal_mask": self.generation_config.flash_attention_causal_mask,
                 }
             )
-
-        if args.warmup:
-            self.warm_up()
-
-    def warm_up(self):
-        for bucket_size in reversed(self.buckets):
-            inps = torch.ones((self.batch_size, bucket_size), dtype=torch.int64)
-            self._model_call(inps)
-            pass
 
     @property
     def max_length(self):
